@@ -17,14 +17,17 @@ class TradingStrategy(Strategy):
     BASE_ASSET = "SPY"
     LEVERAGED_ASSET = "TQQQ"
 
-    # 1) SMA periods (keep initial values the same)
+    # 1) SMA periods
     SMA_FAST_PERIOD = 20
     SMA_SLOW_PERIOD = 32
 
-    # Ratio threshold (keep same behavior: dev / 1.2)
+    # Ratio threshold
     RATIO_STD_DIVISOR = 1.2
 
-    # 2) Initial default asset weights (keep initial values the same)
+    # NEW: rolling lookback for ratio mean/stdev (initial value = 250, configurable)
+    RATIO_LOOKBACK_DAYS = 250
+
+    # 2) Initial default asset weights
     DEFAULT_WEIGHTS = {
         "PAIR1": 0.0,
         "PAIR2": 0.0,
@@ -32,8 +35,7 @@ class TradingStrategy(Strategy):
         "LEVER": 0.2,
     }
 
-    # 3) Rotation weights (keep initial values the same)
-    # When PAIR_ASSET_1 is "expensive" vs PAIR_ASSET_2 -> rotate into PAIR_ASSET_2
+    # 3) Rotation weights
     ROTATE_TO_PAIR2_WEIGHTS = {
         "PAIR1": 0.0,
         "PAIR2": 0.85,
@@ -41,7 +43,6 @@ class TradingStrategy(Strategy):
         "LEVER": 0.05,
     }
 
-    # When PAIR_ASSET_1 is "cheap" vs PAIR_ASSET_2 -> rotate into PAIR_ASSET_1
     ROTATE_TO_PAIR1_WEIGHTS = {
         "PAIR1": 0.85,
         "PAIR2": 0.0,
@@ -49,23 +50,19 @@ class TradingStrategy(Strategy):
         "LEVER": 0.05,
     }
 
-    # 4) Market overlay weights (keep initial values the same)
-    # Overlay trigger thresholds (keep initial values the same)
-    OVERLAY_LEVEL1_FAST_VS_SLOW = 0.99  # ma_fast < 0.99 * ma_slow
-    OVERLAY_LEVEL2_FAST_VS_SLOW = 0.98  # ma_fast < 0.98 * ma_slow
+    # 4) Market overlay weights
+    OVERLAY_LEVEL1_FAST_VS_SLOW = 0.99
+    OVERLAY_LEVEL2_FAST_VS_SLOW = 0.98
 
-    # Level 1 overlay: reduce pair exposure to 1/3, set BASE/LEVER
     OVERLAY_LEVEL1_WEIGHTS = {
         "BASE": 0.3,
         "LEVER": 0.1,
-        "PAIR_SCALE": 1 / 3,   # scale applied to current PAIR1/PAIR2 weights
+        "PAIR_SCALE": 1 / 3,
     }
 
-    # Level 2 overlay (nested inside level 1): override BASE/LEVER only
     OVERLAY_LEVEL2_WEIGHTS = {
         "BASE": 0.2,
         "LEVER": 0.3,
-        # PAIR_SCALE remains whatever Level 1 applied (same as original logic)
     }
 
     # ============================================================
@@ -90,15 +87,22 @@ class TradingStrategy(Strategy):
     # ============================================================
 
     def _materialize_weights(self, template: dict) -> dict:
-        """
-        Convert a template with keys {PAIR1, PAIR2, BASE, LEVER} into a ticker-weight dict.
-        """
         return {
             self.PAIR_ASSET_1: float(template.get("PAIR1", 0.0)),
             self.PAIR_ASSET_2: float(template.get("PAIR2", 0.0)),
             self.BASE_ASSET: float(template.get("BASE", 0.0)),
             self.LEVERAGED_ASSET: float(template.get("LEVER", 0.0)),
         }
+
+    def _ratio_series(self, ohlcv_slice: list) -> list:
+        """
+        Build GOOG/AAPL (PAIR1/PAIR2) close-price ratio series over the provided slice.
+        Assumes each element has both tickers present.
+        """
+        return [
+            day[self.PAIR_ASSET_1]["close"] / day[self.PAIR_ASSET_2]["close"]
+            for day in ohlcv_slice
+        ]
 
     # ============================================================
     # Strategy logic
@@ -107,15 +111,21 @@ class TradingStrategy(Strategy):
     def run(self, data):
         ohlcv = data["ohlcv"]
 
-        # Minimal data gate (kept same)
-        if len(ohlcv) < 4:
+        # Need enough data for ratio window AND SMA windows
+        min_needed = max(4, self.RATIO_LOOKBACK_DAYS, self.SMA_SLOW_PERIOD)
+        if len(ohlcv) < min_needed:
             return TargetAllocation({})
 
-        # Build ratio series across all available history (kept same)
-        ratio = [
-            ohlcv[i][self.PAIR_ASSET_1]["close"] / ohlcv[i][self.PAIR_ASSET_2]["close"]
-            for i in range(len(ohlcv))
-        ]
+        # -------------------------
+        # Rolling ratio statistics
+        # -------------------------
+        lookback = min(self.RATIO_LOOKBACK_DAYS, len(ohlcv))
+        window = ohlcv[-lookback:]  # last N days
+        ratio = self._ratio_series(window)
+
+        # If stdev can't be computed (e.g., len==1), avoid trading
+        if len(ratio) < 2:
+            return TargetAllocation({})
 
         mean_ratio = sum(ratio) / len(ratio)
         dev_ratio = stdev(ratio)
@@ -123,16 +133,18 @@ class TradingStrategy(Strategy):
         upper_band = mean_ratio + dev_ratio / self.RATIO_STD_DIVISOR
         lower_band = mean_ratio - dev_ratio / self.RATIO_STD_DIVISOR
 
-        # Start from default weights (kept same)
+        # Default allocation
         weights = self._materialize_weights(self.DEFAULT_WEIGHTS)
 
-        # Rotation logic (kept same, but parameterized)
+        # Rotation logic based on rolling bands
         if ratio[-1] > upper_band:
             weights = self._materialize_weights(self.ROTATE_TO_PAIR2_WEIGHTS)
         elif ratio[-1] < lower_band:
             weights = self._materialize_weights(self.ROTATE_TO_PAIR1_WEIGHTS)
 
-        # Market overlay (SMA-based) (kept same, but parameterized)
+        # -------------------------
+        # Market overlay (SMA-based)
+        # -------------------------
         ma_fast_series = SMA(self.BASE_ASSET, ohlcv, self.SMA_FAST_PERIOD)
         ma_slow_series = SMA(self.BASE_ASSET, ohlcv, self.SMA_SLOW_PERIOD)
 
@@ -143,16 +155,13 @@ class TradingStrategy(Strategy):
         ma_slow = ma_slow_series[-1]
 
         if ma_fast < self.OVERLAY_LEVEL1_FAST_VS_SLOW * ma_slow:
-            # Scale pair weights
             pair_scale = float(self.OVERLAY_LEVEL1_WEIGHTS.get("PAIR_SCALE", 1.0))
             weights[self.PAIR_ASSET_1] *= pair_scale
             weights[self.PAIR_ASSET_2] *= pair_scale
 
-            # Set BASE / LEVER per overlay level 1
             weights[self.BASE_ASSET] = float(self.OVERLAY_LEVEL1_WEIGHTS["BASE"])
             weights[self.LEVERAGED_ASSET] = float(self.OVERLAY_LEVEL1_WEIGHTS["LEVER"])
 
-            # If deeper downtrend, override BASE/LEVER (kept same)
             if ma_fast < self.OVERLAY_LEVEL2_FAST_VS_SLOW * ma_slow:
                 weights[self.BASE_ASSET] = float(self.OVERLAY_LEVEL2_WEIGHTS["BASE"])
                 weights[self.LEVERAGED_ASSET] = float(self.OVERLAY_LEVEL2_WEIGHTS["LEVER"])

@@ -25,7 +25,7 @@ class TradingStrategy(Strategy):
     RATIO_STD_DIVISOR = 1.2
 
     # NEW: rolling lookback for ratio mean/stdev (initial value = 250, configurable)
-    RATIO_LOOKBACK_DAYS = 300
+    RATIO_LOOKBACK_DAYS = 250
 
     # 2) Initial default asset weights
     DEFAULT_WEIGHTS = {

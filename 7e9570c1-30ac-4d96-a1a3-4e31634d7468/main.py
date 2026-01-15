@@ -1,63 +1,99 @@
 from surmount.base_class import Strategy, TargetAllocation
-from surmount.logging import log
 from statistics import stdev
 from surmount.technical_indicators import SMA
 
 
 class TradingStrategy(Strategy):
 
-   @property
-   def assets(self):
-      return ["GOOG", "AAPL", "SPY", "TQQQ"]
+    # =========================
+    # CONFIGURATION
+    # =========================
+    PAIR_ASSET_1 = "GOOG"
+    PAIR_ASSET_2 = "AAPL"
 
-   @property
-   def interval(self):
-      return "1day"
+    BASE_ASSET = "SPY"
+    LEVERAGED_ASSET = "TQQQ"
 
-   def run(self, data):
-      if (len(data["ohlcv"]) < 4): 
-         return TargetAllocation({})
-      ko_price = data["ohlcv"][-1]["GOOG"]["close"]
-      pep_price = data["ohlcv"][-1]["AAPL"]["close"]
+    @property
+    def assets(self):
+        return [
+            self.PAIR_ASSET_1,
+            self.PAIR_ASSET_2,
+            self.BASE_ASSET,
+            self.LEVERAGED_ASSET,
+        ]
 
-      ratio = [data["ohlcv"][i]["GOOG"]["close"]/data["ohlcv"][i]["AAPL"]["close"] for i in range(len(data["ohlcv"]))]
-      mean = sum(ratio)/len(ratio)
-      dev = stdev(ratio)
+    @property
+    def interval(self):
+        return "1day"
 
-      ko_stake = 0
-      pep_stake = 0
-      spy_stake = 0.8
-      tqqq_stake = 0.2
+    def run(self, data):
 
-      if ratio[-1] > mean + dev/1.2:
-         ko_stake = 0
-         pep_stake = 0.85
-         spy_stake = 0.1
-         tqqq_stake = 0.05
-      
-      elif ratio[-1] < mean - dev/1.2:
-         ko_stake = 0.85
-         pep_stake = 0
-         spy_stake = 0.1
-         tqqq_stake = 0.05
+        ohlcv = data["ohlcv"]
 
-      ma = SMA("SPY", data["ohlcv"], 20)
-      if ma: 
-         ma = ma[-1]
-      else: return TargetAllocation({})
+        if len(ohlcv) < 4:
+            return TargetAllocation({})
 
-      ma2 = SMA("SPY", data["ohlcv"], 32)
-      if ma2:
-         ma2 = ma2[-1]
-      else: return TargetAllocation({})
-      
-      if ma < 0.99*ma2:
-         ko_stake = ko_stake/3
-         pep_stake = pep_stake/3
-         spy_stake = 0.3
-         tqqq_stake = 0.1
-         if ma < 0.98 * ma2:
-            spy_stake = 0.2
-            tqqq_stake = 0.3
+        # =========================
+        # BUILD PRICE RATIO SERIES
+        # =========================
+        ratio = [
+            ohlcv[i][self.PAIR_ASSET_1]["close"] /
+            ohlcv[i][self.PAIR_ASSET_2]["close"]
+            for i in range(len(ohlcv))
+        ]
 
-      return TargetAllocation({"GOOG": ko_stake, "AAPL": pep_stake, "SPY": spy_stake, "TQQQ": tqqq_stake})
+        mean_ratio = sum(ratio) / len(ratio)
+        dev_ratio = stdev(ratio)
+
+        # =========================
+        # DEFAULT ALLOCATION
+        # =========================
+        weights = {
+            self.PAIR_ASSET_1: 0.0,
+            self.PAIR_ASSET_2: 0.0,
+            self.BASE_ASSET: 0.8,
+            self.LEVERAGED_ASSET: 0.2,
+        }
+
+        # =========================
+        # RELATIVE-VALUE SIGNAL
+        # =========================
+        upper_band = mean_ratio + dev_ratio / 1.2
+        lower_band = mean_ratio - dev_ratio / 1.2
+
+        if ratio[-1] > upper_band:
+            # Asset 1 expensive → rotate into Asset 2
+            weights[self.PAIR_ASSET_2] = 0.85
+            weights[self.BASE_ASSET] = 0.10
+            weights[self.LEVERAGED_ASSET] = 0.05
+
+        elif ratio[-1] < lower_band:
+            # Asset 1 cheap → rotate into Asset 1
+            weights[self.PAIR_ASSET_1] = 0.85
+            weights[self.BASE_ASSET] = 0.10
+            weights[self.LEVERAGED_ASSET] = 0.05
+
+        # =========================
+        # TREND FILTER (SPY)
+        # =========================
+        ma20 = SMA(self.BASE_ASSET, ohlcv, 20)
+        ma32 = SMA(self.BASE_ASSET, ohlcv, 32)
+
+        if not ma20 or not ma32:
+            return TargetAllocation({})
+
+        ma20 = ma20[-1]
+        ma32 = ma32[-1]
+
+        if ma20 < 0.99 * ma32:
+            weights[self.PAIR_ASSET_1] /= 3
+            weights[self.PAIR_ASSET_2] /= 3
+            weights[self.BASE_ASSET] = 0.3
+            weights[self.LEVERAGED_ASSET] = 0.1
+
+            if ma20 < 0.98 * ma32:
+                weights[self.BASE_ASSET] = 0.2
+                weights[self.LEVERAGED_ASSET] = 0.3
+
+        return TargetAllocation(weights)

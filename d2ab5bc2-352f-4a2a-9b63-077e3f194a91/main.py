@@ -17,10 +17,10 @@ class TradingStrategy(Strategy):
    def run(self, data):
       if (len(data["ohlcv"]) < 4): 
          return TargetAllocation({})
-      ko_price = data["ohlcv"][-1]["KO"]["close"]
-      pep_price = data["ohlcv"][-1]["PEP"]["close"]
+      ko_price = data["ohlcv"][-1]["GOOG"]["close"]
+      pep_price = data["ohlcv"][-1]["AAPL"]["close"]
 
-      ratio = [data["ohlcv"][i]["KO"]["close"]/data["ohlcv"][i]["PEP"]["close"] for i in range(len(data["ohlcv"]))]
+      ratio = [data["ohlcv"][i]["GOOG"]["close"]/data["ohlcv"][i]["AAPL"]["close"] for i in range(len(data["ohlcv"]))]
       mean = sum(ratio)/len(ratio)
       dev = stdev(ratio)
 
@@ -60,4 +60,4 @@ class TradingStrategy(Strategy):
             spy_stake = 0.2
             tqqq_stake = 0.3
 
-      return TargetAllocation({"KO": ko_stake, "PEP": pep_stake, "SPY": spy_stake, "TQQQ": tqqq_stake})
+      return TargetAllocation({"GOOG": ko_stake, "AAPL": pep_stake, "SPY": spy_stake, "TQQQ": tqqq_stake})
